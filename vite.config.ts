@@ -5,6 +5,9 @@ import hostingConfig from "./.openai/hosting.json";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
+const PENDING_BUCKET_NAME = "pengiriman-paspor-batam-pending";
+const SUBMISSION_QUEUE_NAME = "pengiriman-paspor-batam-submissions";
+const SUBMISSION_DLQ_NAME = "pengiriman-paspor-batam-submissions-dlq";
 
 const { d1, r2 } = hostingConfig;
 
@@ -14,6 +17,7 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  keep_vars: true,
   d1_databases: d1
     ? [
         {
@@ -27,10 +31,29 @@ const localBindingConfig = {
     ? [
         {
           binding: r2,
-          bucket_name: "site-creator-r2",
+          bucket_name: PENDING_BUCKET_NAME,
         },
       ]
     : [],
+  queues: {
+    producers: [
+      {
+        binding: "SUBMISSION_QUEUE",
+        queue: SUBMISSION_QUEUE_NAME,
+      },
+    ],
+    consumers: [
+      {
+        queue: SUBMISSION_QUEUE_NAME,
+        max_batch_size: 1,
+        max_batch_timeout: 1,
+        max_retries: 8,
+        retry_delay: 30,
+        dead_letter_queue: SUBMISSION_DLQ_NAME,
+        max_concurrency: 1,
+      },
+    ],
+  },
 };
 
 export default defineConfig(async () => {

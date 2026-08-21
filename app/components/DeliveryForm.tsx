@@ -18,6 +18,7 @@ type ProcessedProof = {
   size: number;
   base64: string;
 };
+type SubmissionState = "processing" | "synced" | "delayed";
 
 type TurnstileApi = {
   render: (
@@ -29,6 +30,7 @@ type TurnstileApi = {
       "error-callback": () => void;
       theme: "light";
       size: "flexible";
+      action: "passport_submit";
     },
   ) => string;
   reset: (widgetId: string) => void;
@@ -52,6 +54,8 @@ const MAX_SOURCE_FILE = 4 * 1024 * 1024;
 const MAX_PROCESSED_FILE = 2 * 1024 * 1024;
 const TARGET_PROOF_BYTES = 190 * 1024;
 const MAX_CLIENT_PROOF_BYTES = 200 * 1024;
+const SUBMISSION_ID_STORAGE_KEY = "passport-delivery-submission-id";
+const SUCCESS_ID_STORAGE_KEY = "passport-delivery-success-id";
 const ALLOWED_TYPES = new Set<ProofMimeType>(["image/jpeg", "image/png", "image/webp"]);
 const COMPRESSION_ATTEMPTS = [
   { maxDimension: 1600, quality: 0.78 },
@@ -170,9 +174,6 @@ async function toProcessedProof(blob: Blob, mimeType: ProofMimeType): Promise<Pr
 }
 
 async function compressProof(file: File): Promise<ProcessedProof> {
-  const sourceMimeType = file.type as ProofMimeType;
-  if (file.size <= TARGET_PROOF_BYTES) return toProcessedProof(file, sourceMimeType);
-
   const image = await loadImage(file);
   let output: { blob: Blob; mimeType: "image/jpeg" | "image/webp" } | null = null;
 
@@ -208,11 +209,10 @@ async function compressProof(file: File): Promise<ProcessedProof> {
 }
 
 function createSubmissionId() {
-  const storageKey = "passport-delivery-submission-id";
-  const existing = sessionStorage.getItem(storageKey);
+  const existing = sessionStorage.getItem(SUBMISSION_ID_STORAGE_KEY);
   if (existing) return existing;
   const id = crypto.randomUUID();
-  sessionStorage.setItem(storageKey, id);
+  sessionStorage.setItem(SUBMISSION_ID_STORAGE_KEY, id);
   return id;
 }
 
@@ -225,6 +225,7 @@ export function DeliveryForm() {
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitting, setSubmitting] = useState(false);
   const [successId, setSuccessId] = useState("");
+  const [submissionStatus, setSubmissionStatus] = useState<SubmissionState>("processing");
   const [qrOpen, setQrOpen] = useState(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
@@ -233,6 +234,11 @@ export function DeliveryForm() {
   const qrCloseRef = useRef<HTMLButtonElement>(null);
   const proofInputRef = useRef<HTMLInputElement>(null);
   const proofJobRef = useRef(0);
+
+  useEffect(() => {
+    const savedSuccessId = sessionStorage.getItem(SUCCESS_ID_STORAGE_KEY);
+    if (savedSuccessId) setSuccessId(savedSuccessId);
+  }, []);
 
   useEffect(() => {
     fetch("/api/config", { headers: { Accept: "application/json" } })
@@ -259,6 +265,7 @@ export function DeliveryForm() {
         "error-callback": () => setCaptchaToken(""),
         theme: "light",
         size: "flexible",
+        action: "passport_submit",
       });
     };
 
@@ -282,6 +289,50 @@ export function DeliveryForm() {
     document.head.appendChild(script);
     return () => script.removeEventListener("load", renderWidget);
   }, [turnstileSiteKey]);
+
+  useEffect(() => {
+    if (!successId || submissionStatus === "synced") return;
+    const controller = new AbortController();
+    let timer = 0;
+    let checks = 0;
+
+    const checkStatus = async () => {
+      try {
+        const response = await fetch(`/api/status/${encodeURIComponent(successId)}`, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const result = (await response.json().catch(() => null)) as {
+          ok?: boolean;
+          status?: SubmissionState;
+        } | null;
+        if (response.ok && result?.ok && result.status) {
+          setSubmissionStatus(result.status);
+          if (result.status === "synced") return;
+        } else if (response.status === 404) {
+          sessionStorage.removeItem(SUBMISSION_ID_STORAGE_KEY);
+          sessionStorage.removeItem(SUCCESS_ID_STORAGE_KEY);
+          setSubmissionStatus("processing");
+          setSuccessId("");
+          return;
+        }
+      } catch {
+        // Pengajuan sudah diterima; gangguan polling tidak membatalkan penyimpanan.
+      }
+
+      checks += 1;
+      if (checks < 20 && !controller.signal.aborted) {
+        timer = window.setTimeout(checkStatus, 1500);
+      }
+    };
+
+    timer = window.setTimeout(checkStatus, 500);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [successId, submissionStatus]);
 
   useEffect(() => {
     if (!qrOpen) return;
@@ -394,13 +445,20 @@ export function DeliveryForm() {
           noticeVersion: "2026-08-21.v1",
         }),
       });
-      const result = (await response.json().catch(() => null)) as { ok?: boolean; message?: string; submissionId?: string } | null;
+      const result = (await response.json().catch(() => null)) as {
+        ok?: boolean;
+        message?: string;
+        submissionId?: string;
+        status?: SubmissionState;
+      } | null;
       if (!response.ok || !result?.ok) {
         throw new Error(result?.message || "Data belum dapat dikirim. Silakan coba lagi.");
       }
 
-      sessionStorage.removeItem("passport-delivery-submission-id");
-      setSuccessId(result.submissionId || submissionId);
+      const acceptedId = result.submissionId || submissionId;
+      sessionStorage.setItem(SUCCESS_ID_STORAGE_KEY, acceptedId);
+      setSubmissionStatus(result.status || "processing");
+      setSuccessId(acceptedId);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       setErrors((current) => ({
@@ -415,14 +473,32 @@ export function DeliveryForm() {
   }
 
   if (successId) {
+    const isSynced = submissionStatus === "synced";
+    const isDelayed = submissionStatus === "delayed";
     return (
       <section className="success-panel" aria-live="polite">
         <span className="success-icon" aria-hidden="true">✓</span>
-        <span className="eyebrow">Data berhasil diterima</span>
-        <h2>Terima kasih, pengajuan Anda sedang diverifikasi.</h2>
+        <span className="eyebrow">{isSynced ? "Data berhasil tersimpan" : "Data diterima sistem"}</span>
+        <h2>
+          {isSynced
+            ? "Terima kasih, pengajuan Anda menunggu verifikasi."
+            : isDelayed
+              ? "Data aman, sinkronisasi sedang dilanjutkan."
+              : "Data aman dan sedang disimpan otomatis."}
+        </h2>
         <p>
-          Bukti pembayaran dan alamat akan diperiksa petugas. Pengiriman diproses setelah pembayaran dinyatakan sesuai.
+          {isSynced
+            ? "Bukti pembayaran dan alamat sudah tercatat. Pengiriman diproses setelah pembayaran dinyatakan sesuai."
+            : "Anda boleh menutup halaman ini. Sistem akan melanjutkan penyimpanan ke Google Sheets dan Drive di belakang."}
         </p>
+        <div className={`sync-status is-${submissionStatus}`} role="status">
+          {!isSynced && <span className="inline-spinner" aria-hidden="true" />}
+          {isSynced
+            ? "Tersimpan · Menunggu verifikasi petugas"
+            : isDelayed
+              ? "Diterima · Sinkronisasi otomatis dilanjutkan"
+              : "Diterima · Sedang menyinkronkan data"}
+        </div>
         <div className="reference-box">
           <small>ID pengajuan</small>
           <strong>{successId}</strong>
@@ -432,7 +508,10 @@ export function DeliveryForm() {
           className="secondary-button"
           type="button"
           onClick={() => {
+            sessionStorage.removeItem(SUBMISSION_ID_STORAGE_KEY);
+            sessionStorage.removeItem(SUCCESS_ID_STORAGE_KEY);
             setSuccessId("");
+            setSubmissionStatus("processing");
             setValues(EMPTY_FORM);
             removeProof();
           }}
@@ -631,12 +710,12 @@ export function DeliveryForm() {
           {proofProcessing ? (
             <><span className="spinner" aria-hidden="true" /> Menyiapkan gambar…</>
           ) : submitting ? (
-            <><span className="spinner" aria-hidden="true" /> Mengirim data…</>
+            <><span className="spinner" aria-hidden="true" /> Mengamankan data…</>
           ) : (
             <>Kirim data pengiriman <span aria-hidden="true">→</span></>
           )}
         </button>
-        <p className="form-note">Gambar diperkecil otomatis agar lebih cepat dikirim. Pengiriman diproses setelah bukti pembayaran diverifikasi petugas.</p>
+        <p className="form-note">Setelah diterima sistem, penyimpanan dilanjutkan otomatis tanpa membuat Anda menunggu. Pengiriman diproses setelah bukti pembayaran diverifikasi petugas.</p>
       </form>
 
       {qrOpen && (

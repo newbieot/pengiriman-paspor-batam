@@ -1,6 +1,6 @@
 # Panduan Setup Website Pengiriman Paspor Batam
 
-Panduan ini memakai satu **Cloudflare Worker full-stack**: halaman dan API upload berada di domain yang sama. Google Apps Script menjadi jembatan privat ke Google Sheets dan Google Drive. Pilihan ini lebih sederhana daripada memisahkan Cloudflare Pages dan Worker, sekaligus menghindari masalah CORS.
+Panduan ini memakai satu **Cloudflare Worker full-stack**: halaman dan API upload berada di domain yang sama. Data lebih dulu diamankan di R2 privat dan Cloudflare Queue agar pengunjung tidak perlu menunggu Google Apps Script. Google Apps Script kemudian menjadi jembatan privat ke Google Sheets dan Google Drive.
 
 ## Gambaran alur
 
@@ -8,7 +8,8 @@ Panduan ini memakai satu **Cloudflare Worker full-stack**: halaman dan API uploa
 Pengunjung
   → website Cloudflare Worker
   → validasi + Turnstile + nominal tetap Rp25.000
-  → Google Apps Script (dengan token rahasia)
+  → R2 privat + Queue (halaman langsung menampilkan data diterima)
+  → Google Apps Script di belakang (dengan token rahasia)
   → gambar tersimpan privat di Google Drive
   → data + link gambar masuk ke Google Sheets
 ```
@@ -130,6 +131,30 @@ Repo ini memakai Cloudflare Workers Builds, bukan Pages statis, karena formulir 
 
 Jangan sebarkan URL dulu. Pengiriman data akan tetap gagal aman sampai konfigurasi runtime diisi.
 
+### Buat penyimpanan sementara dan antrean
+
+Sebelum deployment kode pengiriman cepat, buat tiga resource berikut di akun Cloudflare yang sama:
+
+| Jenis | Nama |
+|---|---|
+| R2 bucket privat | `pengiriman-paspor-batam-pending` |
+| Queue utama | `pengiriman-paspor-batam-submissions` |
+| Dead-letter Queue | `pengiriman-paspor-batam-submissions-dlq` |
+
+Cara paling ringkas dari folder proyek:
+
+```bash
+npx wrangler login
+npx wrangler r2 bucket create pengiriman-paspor-batam-pending
+npx wrangler r2 bucket lifecycle add pengiriman-paspor-batam-pending --id expire-temp-after-one-day --expire-days 1
+npx wrangler queues create pengiriman-paspor-batam-submissions
+npx wrangler queues create pengiriman-paspor-batam-submissions-dlq
+npx wrangler queues update pengiriman-paspor-batam-submissions --message-retention-period-secs 86400
+npx wrangler queues update pengiriman-paspor-batam-submissions-dlq --message-retention-period-secs 86400
+```
+
+Jangan aktifkan `r2.dev` atau custom domain untuk bucket ini. Bukti pembayaran hanya berada di R2 selama menunggu sinkronisasi, lalu dihapus segera setelah Google Drive dan Sheets menyatakan berhasil. Lifecycle satu hari menjadi pengaman untuk data sementara yang gagal atau tertinggal.
+
 ## F. Tambahkan konfigurasi runtime Cloudflare
 
 Buka Worker → **Settings → Variables and Secrets**. Ini adalah konfigurasi runtime, bukan “Build variables”. Tambahkan:
@@ -172,11 +197,12 @@ Gunakan data uji, bukan data paspor asli.
 3. Unggah gambar bukti uji di bawah 4 MB.
 4. Centang pemberitahuan privasi dan selesaikan Turnstile.
 5. Klik **Kirim data pengiriman**.
-6. Pastikan halaman menampilkan ID pengajuan.
-7. Buka Google Sheets dan pastikan muncul satu baris dengan status `MENUNGGU VERIFIKASI`.
-8. Klik URL bukti dari akun petugas berizin. Pastikan akun lain tidak dapat membukanya.
-9. Kirim ulang dengan ID yang sama saat menguji retry; script tidak boleh membuat baris/file ganda.
-10. Uji file salah, ukuran lebih dari 4 MB, nomor WhatsApp salah, dan Turnstile belum selesai; semuanya harus ditolak.
+6. Pastikan halaman segera menampilkan ID pengajuan dan status `Diterima · Sedang menyinkronkan data`.
+7. Tunggu status berubah menjadi `Tersimpan · Menunggu verifikasi petugas`.
+8. Buka Google Sheets dan pastikan muncul satu baris dengan status `MENUNGGU VERIFIKASI`.
+9. Klik URL bukti dari akun petugas berizin. Pastikan akun lain tidak dapat membukanya.
+10. Kirim ulang dengan ID yang sama saat menguji retry; script tidak boleh membuat baris/file ganda.
+11. Uji file salah, ukuran lebih dari 4 MB, nomor WhatsApp salah, dan Turnstile belum selesai; semuanya harus ditolak.
 
 Upload bukti tidak berarti pembayaran otomatis sah. Petugas tetap harus memeriksa transaksi sebelum mengubah status dan memproses pengiriman.
 
@@ -197,6 +223,7 @@ Sesudah semua izin tertulis, pemeriksaan keamanan, kebijakan privasi, dan QRIS d
 - Jangan mengubah folder Drive menjadi publik. Audit daftar petugas yang punya akses.
 - Hapus/anonymkan data operasional dan gambar bukti setelah masa retensi yang disahkan.
 - Jangan mencatat alamat, WhatsApp, atau base64 gambar ke log Cloudflare.
+- Pantau Queue utama dan dead-letter Queue; pesan Queue hanya berisi ID acak, bukan data pelanggan.
 - Ubah status Sheets hanya setelah verifikasi pembayaran.
 
 ## Pemecahan masalah
@@ -206,6 +233,8 @@ Sesudah semua izin tertulis, pemeriksaan keamanan, kebijakan privasi, dan QRIS d
 | “Layanan penyimpanan belum dikonfigurasi” | URL/token belum ada di Worker | Periksa `APPS_SCRIPT_URL` dan `APPS_SCRIPT_TOKEN`, lalu Deploy |
 | “Pemeriksaan keamanan gagal” | Site Key/Secret tidak sepasang atau hostname belum didaftarkan | Periksa widget Turnstile dan hostname |
 | Data tidak masuk ke Sheets | Apps Script belum dideploy sebagai `/exec`, properti salah, atau izin Google belum selesai | Periksa deployment dan Script Properties |
+| Status lama di “sedang menyinkronkan” | Apps Script lambat atau Queue sedang retry | Periksa metrik Queue dan dead-letter Queue; jangan menghapus objek R2 secara manual sebelum rekonsiliasi |
+| Deploy gagal karena binding R2/Queue | Resource belum dibuat atau namanya berbeda | Buat ketiga resource dengan nama persis seperti tabel di atas |
 | Link gambar meminta akses | Ini perilaku yang benar | Masuk dengan akun petugas yang sudah diberi akses folder |
 | Build Cloudflare gagal menemukan config | Perintah deploy tidak menunjuk hasil build | Gunakan `--config dist/server/wrangler.json` |
 | Build gagal karena nama Worker | Nama Worker tidak sesuai config hasil build | Gunakan nama `pengiriman-paspor-batam` |

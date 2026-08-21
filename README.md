@@ -8,6 +8,8 @@ Fitur utama:
 - QRIS ongkir + sampul Rp25.000;
 - kompresi gambar sebelum unggah;
 - validasi berlapis dan Cloudflare Turnstile;
+- penerimaan cepat melalui R2 privat dan Cloudflare Queue;
+- status sinkronisasi tanpa menampilkan data pribadi;
 - Google Apps Script menyimpan gambar ke Drive dan baris + link privat ke Sheets;
 - pencegahan kiriman ganda dengan ID pengajuan;
 - tampilan responsif, aksesibel, dan nyaman untuk ponsel.
@@ -21,7 +23,7 @@ npm install
 npm run dev
 ```
 
-Buka `http://localhost:3000`. Tanpa `.dev.vars`, tampilan dapat diuji tetapi pengiriman data akan berhenti aman dengan pesan bahwa penyimpanan belum dikonfigurasi.
+Buka `http://localhost:3000`. Tanpa `.dev.vars`, tampilan dapat diuji tetapi pengiriman data akan berhenti aman dengan pesan bahwa penyimpanan belum dikonfigurasi. R2 dan Queue lokal disediakan otomatis oleh lingkungan pengembangan.
 
 Untuk menguji konfigurasi lokal, salin `.dev.vars.example` menjadi `.dev.vars`, lalu isi nilainya. Jangan commit `.dev.vars`.
 
@@ -39,6 +41,7 @@ Ikuti [PANDUAN_SETUP.md](./PANDUAN_SETUP.md) untuk menyiapkan Google Sheets, Dri
 
 - `app/` — halaman dan pengalaman formulir;
 - `worker/index.ts` — API aman di Cloudflare Worker;
+- `vite.config.ts` — binding R2 privat dan Queue sinkronisasi;
 - `google-apps-script/Code.gs` — penyimpanan Google Sheets + Drive;
 - `public/assets/` — logo resmi dan QRIS;
 - `.dev.vars.example` — daftar konfigurasi tanpa rahasia.

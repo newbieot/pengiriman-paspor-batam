@@ -14,11 +14,45 @@ interface Env {
   APPS_SCRIPT_TOKEN?: string;
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET?: string;
+  PENDING_SUBMISSIONS?: R2BucketBinding;
+  SUBMISSION_QUEUE?: QueueProducer<SubmissionJob>;
 }
 
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
+}
+
+interface R2ObjectBody {
+  text(): Promise<string>;
+}
+
+interface R2BucketBinding {
+  get(key: string): Promise<R2ObjectBody | null>;
+  put(
+    key: string,
+    value: string,
+    options?: {
+      onlyIf?: { etagDoesNotMatch?: string };
+      httpMetadata?: { contentType?: string };
+    },
+  ): Promise<object | null>;
+  delete(key: string): Promise<void>;
+}
+
+interface QueueProducer<T> {
+  send(message: T): Promise<void>;
+}
+
+interface QueueMessage<T> {
+  body: T;
+  attempts: number;
+  ack(): void;
+  retry(options?: { delaySeconds?: number }): void;
+}
+
+interface QueueBatch<T> {
+  messages: readonly QueueMessage<T>[];
 }
 
 type SubmissionPayload = {
@@ -38,8 +72,49 @@ type ProofPayload = {
   base64?: unknown;
 };
 
-const MAX_REQUEST_BYTES = 3_250_000;
-const MAX_PROOF_BYTES = 2 * 1024 * 1024;
+type ValidSubmission = {
+  submissionId: string;
+  fullName: string;
+  address: string;
+  whatsapp: string;
+  noticeVersion: string;
+  proof: {
+    mimeType: string;
+    size: number;
+    base64: string;
+  };
+};
+
+type PendingSubmission = {
+  schemaVersion: 1;
+  fingerprint: string;
+  acceptedAt: string;
+  payload: ValidSubmission & {
+    amount: 25000;
+    privacyAccepted: true;
+  };
+};
+
+type SubmissionState = "processing" | "synced" | "delayed";
+
+type SubmissionStatusRecord = {
+  schemaVersion: 1;
+  submissionId: string;
+  fingerprint: string;
+  state: SubmissionState;
+  acceptedAt: string;
+  updatedAt: string;
+  attempts?: number;
+};
+
+type SubmissionJob = {
+  schemaVersion: 1;
+  submissionId: string;
+};
+
+const MAX_REQUEST_BYTES = 320 * 1024;
+const MAX_PROOF_BYTES = 200 * 1024;
+const TURNSTILE_ACTION = "passport_submit";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PHONE_PATTERN = /^628\d{8,12}$/;
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -81,7 +156,7 @@ function matchesMagicBytes(mimeType: string, base64: string) {
   }
 }
 
-function validateSubmission(payload: SubmissionPayload) {
+function validateSubmission(payload: SubmissionPayload): { error: string } | { value: ValidSubmission } {
   const submissionId = asTrimmedString(payload.submissionId);
   const fullName = asTrimmedString(payload.fullName);
   const address = asTrimmedString(payload.address);
@@ -100,10 +175,10 @@ function validateSubmission(payload: SubmissionPayload) {
   if (address.length < 15 || address.length > 500) return { error: "Alamat penerima tidak valid." };
   if (!PHONE_PATTERN.test(whatsapp)) return { error: "Nomor WhatsApp tidak valid." };
   if (!ALLOWED_MIME.has(mimeType)) return { error: "Format bukti pembayaran tidak didukung." };
-  if (!Number.isInteger(claimedSize) || claimedSize < 100 || claimedSize > MAX_PROOF_BYTES) {
+  if (!Number.isInteger(claimedSize) || claimedSize < 100 || claimedSize >= MAX_PROOF_BYTES) {
     return { error: "Ukuran bukti pembayaran tidak valid." };
   }
-  if (actualSize < 100 || actualSize > MAX_PROOF_BYTES || Math.abs(actualSize - claimedSize) > 2) {
+  if (actualSize < 100 || actualSize >= MAX_PROOF_BYTES || Math.abs(actualSize - claimedSize) > 2) {
     return { error: "Data bukti pembayaran tidak valid." };
   }
   if (!matchesMagicBytes(mimeType, base64)) return { error: "Isi file bukti pembayaran tidak valid." };
@@ -113,7 +188,7 @@ function validateSubmission(payload: SubmissionPayload) {
   };
 }
 
-async function verifyTurnstile(secret: string, token: string, remoteIp: string) {
+async function verifyTurnstile(secret: string, token: string, remoteIp: string, expectedHostname: string) {
   if (!token) return false;
   const form = new FormData();
   form.set("secret", secret);
@@ -125,8 +200,8 @@ async function verifyTurnstile(secret: string, token: string, remoteIp: string) 
     body: form,
   });
   if (!response.ok) return false;
-  const result = (await response.json()) as { success?: boolean };
-  return result.success === true;
+  const result = (await response.json()) as { success?: boolean; hostname?: string; action?: string };
+  return result.success === true && result.hostname === expectedHostname && result.action === TURNSTILE_ACTION;
 }
 
 function isAllowedAppsScriptUrl(value: string) {
@@ -136,6 +211,83 @@ function isAllowedAppsScriptUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+function pendingObjectKey(submissionId: string) {
+  return `pending/${submissionId}.json`;
+}
+
+function statusObjectKey(submissionId: string) {
+  return `status/${submissionId}.json`;
+}
+
+async function readJsonObject<T>(bucket: R2BucketBinding, key: string): Promise<T | null> {
+  const object = await bucket.get(key);
+  if (!object) return null;
+  return JSON.parse(await object.text()) as T;
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function fingerprintSubmission(value: ValidSubmission) {
+  return sha256Hex(JSON.stringify(value));
+}
+
+function isStatusRecord(value: unknown): value is SubmissionStatusRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<SubmissionStatusRecord>;
+  return record.schemaVersion === 1 &&
+    typeof record.submissionId === "string" &&
+    UUID_PATTERN.test(record.submissionId) &&
+    typeof record.fingerprint === "string" &&
+    /^[0-9a-f]{64}$/.test(record.fingerprint) &&
+    (record.state === "processing" || record.state === "synced" || record.state === "delayed") &&
+    typeof record.acceptedAt === "string" &&
+    typeof record.updatedAt === "string";
+}
+
+function isPendingSubmission(value: unknown): value is PendingSubmission {
+  if (!value || typeof value !== "object") return false;
+  const pending = value as Partial<PendingSubmission>;
+  return pending.schemaVersion === 1 &&
+    typeof pending.fingerprint === "string" &&
+    typeof pending.acceptedAt === "string" &&
+    Boolean(pending.payload && typeof pending.payload === "object");
+}
+
+async function saveStatus(bucket: R2BucketBinding, record: SubmissionStatusRecord, firstWriteOnly = false) {
+  return bucket.put(statusObjectKey(record.submissionId), JSON.stringify(record), {
+    ...(firstWriteOnly ? { onlyIf: { etagDoesNotMatch: "*" } } : {}),
+    httpMetadata: { contentType: "application/json" },
+  });
+}
+
+function statusMessage(state: SubmissionState) {
+  if (state === "synced") return "Data sudah tersimpan dan menunggu verifikasi petugas.";
+  if (state === "delayed") return "Data sudah diterima. Sinkronisasi sedang dilanjutkan otomatis.";
+  return "Data diterima sistem dan sedang diproses.";
+}
+
+function publicStatus(record: SubmissionStatusRecord) {
+  return {
+    ok: true,
+    submissionId: record.submissionId,
+    status: record.state,
+    message: statusMessage(record.state),
+    updatedAt: record.updatedAt,
+  };
+}
+
+async function loadStatus(bucket: R2BucketBinding, submissionId: string) {
+  const record = await readJsonObject<unknown>(bucket, statusObjectKey(submissionId));
+  if (record === null) return null;
+  if (!isStatusRecord(record) || record.submissionId !== submissionId) {
+    throw new Error("Invalid submission status");
+  }
+  return record;
 }
 
 async function handleSubmission(request: Request, env: Env) {
@@ -149,7 +301,11 @@ async function handleSubmission(request: Request, env: Env) {
 
   let payload: SubmissionPayload;
   try {
-    payload = (await request.json()) as SubmissionPayload;
+    const rawBody = await request.text();
+    if (new TextEncoder().encode(rawBody).byteLength > MAX_REQUEST_BYTES) {
+      return jsonResponse({ ok: false, message: "Foto bukti pembayaran terlalu besar." }, 413);
+    }
+    payload = JSON.parse(rawBody) as SubmissionPayload;
   } catch {
     return jsonResponse({ ok: false, message: "Data formulir tidak dapat dibaca." }, 400);
   }
@@ -161,12 +317,19 @@ async function handleSubmission(request: Request, env: Env) {
   const validated = validateSubmission(payload);
   if ("error" in validated) return jsonResponse({ ok: false, message: validated.error }, 400);
 
+  const hasTurnstileSiteKey = Boolean(env.TURNSTILE_SITE_KEY);
+  const hasTurnstileSecret = Boolean(env.TURNSTILE_SECRET);
+  if (hasTurnstileSiteKey !== hasTurnstileSecret) {
+    return jsonResponse({ ok: false, message: "Pemeriksaan keamanan belum dikonfigurasi dengan benar." }, 503);
+  }
+
   if (env.TURNSTILE_SECRET) {
     try {
       const verified = await verifyTurnstile(
         env.TURNSTILE_SECRET,
         asTrimmedString(payload.turnstileToken),
         request.headers.get("CF-Connecting-IP") || "",
+        new URL(request.url).hostname,
       );
       if (!verified) return jsonResponse({ ok: false, message: "Pemeriksaan keamanan gagal. Silakan muat ulang halaman." }, 400);
     } catch {
@@ -174,44 +337,175 @@ async function handleSubmission(request: Request, env: Env) {
     }
   }
 
-  if (!env.APPS_SCRIPT_URL || !isAllowedAppsScriptUrl(env.APPS_SCRIPT_URL) || !env.APPS_SCRIPT_TOKEN) {
+  if (
+    !env.APPS_SCRIPT_URL ||
+    !isAllowedAppsScriptUrl(env.APPS_SCRIPT_URL) ||
+    !env.APPS_SCRIPT_TOKEN ||
+    !env.PENDING_SUBMISSIONS ||
+    !env.SUBMISSION_QUEUE
+  ) {
     return jsonResponse({ ok: false, message: "Layanan penyimpanan belum dikonfigurasi oleh pengelola." }, 503);
   }
 
+  const bucket = env.PENDING_SUBMISSIONS;
+  const submissionId = validated.value.submissionId;
+  const fingerprint = await fingerprintSubmission(validated.value);
+  const now = new Date().toISOString();
+
   try {
-    const upstream = await fetch(env.APPS_SCRIPT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const existingStatus = await loadStatus(bucket, submissionId);
+    if (existingStatus && existingStatus.fingerprint !== fingerprint) {
+      return jsonResponse({ ok: false, message: "ID pengajuan sudah digunakan untuk data yang berbeda. Muat ulang halaman lalu coba lagi." }, 409);
+    }
+    if (existingStatus?.state === "synced") {
+      return jsonResponse(publicStatus(existingStatus));
+    }
+
+    const pending: PendingSubmission = {
+      schemaVersion: 1,
+      fingerprint,
+      acceptedAt: existingStatus?.acceptedAt || now,
+      payload: {
         ...validated.value,
-        integrationToken: env.APPS_SCRIPT_TOKEN,
         amount: 25000,
         privacyAccepted: true,
-      }),
-      redirect: "follow",
-      signal: AbortSignal.timeout(25_000),
+      },
+    };
+
+    const pendingKey = pendingObjectKey(submissionId);
+    const createdPending = await bucket.put(pendingKey, JSON.stringify(pending), {
+      onlyIf: { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/json" },
     });
 
-    const text = await upstream.text();
-    let result: { ok?: boolean; message?: string; submissionId?: string } | null = null;
-    try {
-      result = JSON.parse(text) as typeof result;
-    } catch {
-      result = null;
+    if (!createdPending) {
+      const existingPending = await readJsonObject<unknown>(bucket, pendingKey);
+      if (!isPendingSubmission(existingPending) || existingPending.fingerprint !== fingerprint) {
+        return jsonResponse({ ok: false, message: "ID pengajuan sudah digunakan untuk data yang berbeda. Muat ulang halaman lalu coba lagi." }, 409);
+      }
     }
 
-    if (!upstream.ok || !result?.ok) {
-      return jsonResponse({ ok: false, message: result?.message || "Penyimpanan data sedang bermasalah. Silakan coba lagi." }, 502);
+    let currentStatus = existingStatus;
+    if (!currentStatus) {
+      const initialStatus: SubmissionStatusRecord = {
+        schemaVersion: 1,
+        submissionId,
+        fingerprint,
+        state: "processing",
+        acceptedAt: pending.acceptedAt,
+        updatedAt: now,
+      };
+      const createdStatus = await saveStatus(bucket, initialStatus, true);
+      currentStatus = createdStatus ? initialStatus : await loadStatus(bucket, submissionId);
+      if (!currentStatus || currentStatus.fingerprint !== fingerprint) {
+        return jsonResponse({ ok: false, message: "ID pengajuan sudah digunakan untuk data yang berbeda. Muat ulang halaman lalu coba lagi." }, 409);
+      }
     }
 
-    return jsonResponse({
-      ok: true,
-      submissionId: result.submissionId || validated.value.submissionId,
-      message: "Data berhasil diterima dan menunggu verifikasi.",
-    });
+    await env.SUBMISSION_QUEUE.send({ schemaVersion: 1, submissionId });
+
+    return jsonResponse(publicStatus(currentStatus), 202);
   } catch (error) {
-    console.error("Submission upstream request failed", error instanceof Error ? error.name : "unknown");
-    return jsonResponse({ ok: false, message: "Koneksi ke penyimpanan sedang bermasalah. Silakan coba lagi." }, 504);
+    console.error("Submission acceptance failed", error instanceof Error ? error.name : "unknown");
+    return jsonResponse({ ok: false, message: "Data belum dapat diamankan. Silakan tekan kirim kembali." }, 503);
+  }
+}
+
+async function syncSubmission(job: SubmissionJob, env: Env) {
+  if (job.schemaVersion !== 1 || !UUID_PATTERN.test(job.submissionId)) {
+    throw new Error("Invalid queue job");
+  }
+  if (
+    !env.PENDING_SUBMISSIONS ||
+    !env.APPS_SCRIPT_URL ||
+    !isAllowedAppsScriptUrl(env.APPS_SCRIPT_URL) ||
+    !env.APPS_SCRIPT_TOKEN
+  ) {
+    throw new Error("Storage configuration unavailable");
+  }
+
+  const bucket = env.PENDING_SUBMISSIONS;
+  const currentStatus = await loadStatus(bucket, job.submissionId);
+  if (currentStatus?.state === "synced") {
+    await bucket.delete(pendingObjectKey(job.submissionId));
+    return;
+  }
+
+  const pending = await readJsonObject<unknown>(bucket, pendingObjectKey(job.submissionId));
+  if (!isPendingSubmission(pending)) throw new Error("Pending submission unavailable");
+
+  const validated = validateSubmission(pending.payload);
+  if ("error" in validated || validated.value.submissionId !== job.submissionId) {
+    throw new Error("Pending submission invalid");
+  }
+  const fingerprint = await fingerprintSubmission(validated.value);
+  if (fingerprint !== pending.fingerprint || (currentStatus && currentStatus.fingerprint !== fingerprint)) {
+    throw new Error("Pending submission fingerprint mismatch");
+  }
+
+  const upstream = await fetch(env.APPS_SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...validated.value,
+      integrationToken: env.APPS_SCRIPT_TOKEN,
+      amount: 25000,
+      privacyAccepted: true,
+    }),
+    redirect: "follow",
+    signal: AbortSignal.timeout(25_000),
+  });
+
+  const text = await upstream.text();
+  let result: { ok?: boolean; submissionId?: string } | null = null;
+  try {
+    result = JSON.parse(text) as typeof result;
+  } catch {
+    result = null;
+  }
+  if (!upstream.ok || !result?.ok || result.submissionId !== job.submissionId) {
+    throw new Error("Google storage rejected submission");
+  }
+
+  const syncedAt = new Date().toISOString();
+  const syncedStatus: SubmissionStatusRecord = {
+    schemaVersion: 1,
+    submissionId: job.submissionId,
+    fingerprint,
+    state: "synced",
+    acceptedAt: currentStatus?.acceptedAt || pending.acceptedAt,
+    updatedAt: syncedAt,
+  };
+
+  await saveStatus(bucket, syncedStatus);
+  await bucket.delete(pendingObjectKey(job.submissionId));
+}
+
+async function markSubmissionDelayed(job: SubmissionJob, attempts: number, env: Env) {
+  if (!env.PENDING_SUBMISSIONS || !UUID_PATTERN.test(job.submissionId)) return;
+  const currentStatus = await loadStatus(env.PENDING_SUBMISSIONS, job.submissionId);
+  if (!currentStatus || currentStatus.state === "synced") return;
+  await saveStatus(env.PENDING_SUBMISSIONS, {
+    ...currentStatus,
+    state: "delayed",
+    attempts,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function handleStatus(request: Request, env: Env, submissionId: string) {
+  if (request.method !== "GET") return jsonResponse({ ok: false, message: "Metode tidak diizinkan." }, 405);
+  if (!UUID_PATTERN.test(submissionId)) return jsonResponse({ ok: false, message: "ID pengajuan tidak valid." }, 400);
+  if (!env.PENDING_SUBMISSIONS) {
+    return jsonResponse({ ok: false, message: "Layanan status belum dikonfigurasi oleh pengelola." }, 503);
+  }
+
+  try {
+    const record = await loadStatus(env.PENDING_SUBMISSIONS, submissionId);
+    if (!record) return jsonResponse({ ok: false, message: "Status pengajuan tidak ditemukan." }, 404);
+    return jsonResponse(publicStatus(record));
+  } catch {
+    return jsonResponse({ ok: false, message: "Status pengajuan belum dapat diperiksa." }, 503);
   }
 }
 
@@ -239,6 +533,11 @@ const worker = {
 
     if (url.pathname === "/api/submit") return handleSubmission(request, env);
 
+    if (url.pathname.startsWith("/api/status/")) {
+      const submissionId = decodeURIComponent(url.pathname.slice("/api/status/".length));
+      return handleStatus(request, env, submissionId);
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return handleImageOptimization(
@@ -256,6 +555,29 @@ const worker = {
 
     const response = await handler.fetch(request, env, ctx);
     return withSecurityHeaders(response);
+  },
+
+  async queue(batch: QueueBatch<SubmissionJob>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        await syncSubmission(message.body, env);
+        message.ack();
+      } catch (error) {
+        try {
+          await markSubmissionDelayed(message.body, message.attempts, env);
+        } catch {
+          // Status tambahan tidak boleh menghalangi retry penyimpanan utama.
+        }
+        console.error("Submission sync failed", {
+          submissionId: UUID_PATTERN.test(message.body?.submissionId || "") ? message.body.submissionId : "invalid",
+          attempts: message.attempts,
+          reason: error instanceof Error ? error.name : "unknown",
+        });
+        message.retry({
+          delaySeconds: Math.min(30 * (2 ** Math.max(0, message.attempts - 1)), 900),
+        });
+      }
+    }
   },
 };
 

@@ -279,6 +279,9 @@ input[aria-invalid="true"], textarea[aria-invalid="true"], .phone-field.has-erro
 .success-icon { width: 64px; height: 64px; margin-bottom: 24px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--success); font-size: 28px; box-shadow: 0 12px 28px rgba(24, 121, 78, .22); }
 .success-panel h2 { max-width: 390px; margin: 13px 0 11px; color: var(--navy-deep); font-size: 28px; line-height: 1.15; letter-spacing: -.035em; }
 .success-panel > p { max-width: 390px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.sync-status { margin-top: 18px; padding: 10px 13px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #d6e2ee; border-radius: 999px; color: var(--navy); background: #f4f8fc; font-size: 9px; font-weight: 750; }
+.sync-status.is-synced { border-color: #bce0cf; color: var(--success); background: #effaf4; }
+.sync-status.is-delayed { border-color: #f1d7a0; color: #805700; background: #fff9e9; }
 .reference-box { width: 100%; margin: 26px 0 12px; padding: 15px; display: grid; border: 1px dashed #cbd2da; border-radius: 12px; background: #f9fafb; }
 .reference-box small { color: #7d8794; font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
 .reference-box strong { margin-top: 6px; color: var(--navy); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
