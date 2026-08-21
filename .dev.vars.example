@@ -1,0 +1,9 @@
+# Salin file ini menjadi .dev.vars hanya untuk pengujian lokal.
+# Jangan pernah commit .dev.vars atau token asli ke GitHub.
+
+APPS_SCRIPT_URL="https://script.google.com/macros/s/GANTI_DENGAN_DEPLOYMENT_ID/exec"
+APPS_SCRIPT_TOKEN="GANTI_DENGAN_TOKEN_ACAK_MINIMAL_32_KARAKTER"
+TURNSTILE_SITE_KEY=""
+TURNSTILE_SECRET=""
+SITE_URL="http://localhost:3000"
+PUBLIC_INDEXING="false"
