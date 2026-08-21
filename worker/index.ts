@@ -113,7 +113,7 @@ type SubmissionJob = {
 };
 
 const MAX_REQUEST_BYTES = 320 * 1024;
-const MAX_PROOF_BYTES = 200 * 1024;
+const MAX_PROOF_BYTES = 70 * 1024;
 const TURNSTILE_ACTION = "passport_submit";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PHONE_PATTERN = /^628\d{8,12}$/;

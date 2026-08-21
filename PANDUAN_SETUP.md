@@ -194,7 +194,7 @@ Gunakan data uji, bukan data paspor asli.
 
 1. Buka website dari ponsel.
 2. Isi nama, alamat uji, dan WhatsApp uji.
-3. Unggah gambar bukti uji di bawah 4 MB.
+3. Unggah gambar bukti uji hingga 10 MB dan pastikan hasil optimasinya di bawah 70 KB.
 4. Centang pemberitahuan privasi dan selesaikan Turnstile.
 5. Klik **Kirim data pengiriman**.
 6. Pastikan halaman segera menampilkan ID pengajuan dan status `Diterima · Sedang menyinkronkan data`.
@@ -202,7 +202,7 @@ Gunakan data uji, bukan data paspor asli.
 8. Buka Google Sheets dan pastikan muncul satu baris dengan status `MENUNGGU VERIFIKASI`.
 9. Klik URL bukti dari akun petugas berizin. Pastikan akun lain tidak dapat membukanya.
 10. Kirim ulang dengan ID yang sama saat menguji retry; script tidak boleh membuat baris/file ganda.
-11. Uji file salah, ukuran lebih dari 4 MB, nomor WhatsApp salah, dan Turnstile belum selesai; semuanya harus ditolak.
+11. Uji file salah, ukuran lebih dari 10 MB, nomor WhatsApp salah, dan Turnstile belum selesai; semuanya harus ditolak.
 
 Upload bukti tidak berarti pembayaran otomatis sah. Petugas tetap harus memeriksa transaksi sebelum mengubah status dan memproses pengiriman.
 

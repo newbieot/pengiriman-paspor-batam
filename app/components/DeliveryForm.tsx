@@ -50,22 +50,24 @@ const EMPTY_FORM: FormValues = {
   website: "",
 };
 
-const MAX_SOURCE_FILE = 4 * 1024 * 1024;
-const MAX_PROCESSED_FILE = 2 * 1024 * 1024;
-const TARGET_PROOF_BYTES = 190 * 1024;
-const MAX_CLIENT_PROOF_BYTES = 200 * 1024;
+const MAX_SOURCE_FILE = 10 * 1024 * 1024;
+const TARGET_PROOF_BYTES = 64 * 1024;
+const MAX_CLIENT_PROOF_BYTES = 70 * 1024;
 const SUBMISSION_ID_STORAGE_KEY = "passport-delivery-submission-id";
 const SUCCESS_ID_STORAGE_KEY = "passport-delivery-success-id";
 const ALLOWED_TYPES = new Set<ProofMimeType>(["image/jpeg", "image/png", "image/webp"]);
 const COMPRESSION_ATTEMPTS = [
-  { maxDimension: 1600, quality: 0.78 },
-  { maxDimension: 1600, quality: 0.68 },
-  { maxDimension: 1600, quality: 0.58 },
-  { maxDimension: 1440, quality: 0.62 },
-  { maxDimension: 1440, quality: 0.54 },
-  { maxDimension: 1280, quality: 0.58 },
-  { maxDimension: 1200, quality: 0.54 },
-  { maxDimension: 1200, quality: 0.5 },
+  { maxDimension: 1600, quality: 0.72 },
+  { maxDimension: 1600, quality: 0.56 },
+  { maxDimension: 1600, quality: 0.42 },
+  { maxDimension: 1440, quality: 0.52 },
+  { maxDimension: 1440, quality: 0.38 },
+  { maxDimension: 1280, quality: 0.48 },
+  { maxDimension: 1280, quality: 0.34 },
+  { maxDimension: 1120, quality: 0.42 },
+  { maxDimension: 1120, quality: 0.3 },
+  { maxDimension: 960, quality: 0.36 },
+  { maxDimension: 960, quality: 0.26 },
 ] as const;
 let webpEncodingSupported: boolean | null = null;
 
@@ -176,33 +178,41 @@ async function toProcessedProof(blob: Blob, mimeType: ProofMimeType): Promise<Pr
 async function compressProof(file: File): Promise<ProcessedProof> {
   const image = await loadImage(file);
   let output: { blob: Blob; mimeType: "image/jpeg" | "image/webp" } | null = null;
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Perangkat tidak mendukung pemrosesan gambar.");
+  let renderedWidth = 0;
+  let renderedHeight = 0;
 
   for (const attempt of COMPRESSION_ATTEMPTS) {
     const { maxDimension, quality } = attempt;
     const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Perangkat tidak mendukung pemrosesan gambar.");
+    if (width !== renderedWidth || height !== renderedHeight) {
+      canvas.width = width;
+      canvas.height = height;
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      renderedWidth = width;
+      renderedHeight = height;
+    }
 
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, width, height);
-    context.drawImage(image, 0, 0, width, height);
-    output = await canvasToPreferredBlob(canvas, quality);
+    const candidate = await canvasToPreferredBlob(canvas, quality);
+    if (!output || candidate.blob.size < output.blob.size) output = candidate;
+    if (candidate.blob.size <= TARGET_PROOF_BYTES) {
+      output = candidate;
+      break;
+    }
 
-    if (output.blob.size <= TARGET_PROOF_BYTES) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
-  if (!output || output.blob.size > MAX_PROCESSED_FILE) {
-    throw new Error("Foto masih terlalu besar. Potong area bukti pembayaran lalu coba lagi.");
-  }
-  if (output.blob.size >= MAX_CLIENT_PROOF_BYTES) {
-    throw new Error("Gambar belum dapat diperkecil di bawah 200 KB tanpa mengurangi keterbacaan. Potong area transaksi lalu coba lagi.");
+  if (!output || output.blob.size >= MAX_CLIENT_PROOF_BYTES) {
+    throw new Error("Gambar belum dapat diperkecil di bawah 70 KB tanpa mengurangi keterbacaan. Potong area transaksi lalu coba lagi.");
   }
 
   return toProcessedProof(output.blob, output.mimeType);
@@ -371,7 +381,7 @@ export function DeliveryForm() {
       return;
     }
     if (file.size > MAX_SOURCE_FILE) {
-      setErrors((current) => ({ ...current, proof: "Ukuran foto maksimal 4 MB." }));
+      setErrors((current) => ({ ...current, proof: "Ukuran foto maksimal 10 MB." }));
       input.value = "";
       return;
     }
@@ -651,7 +661,7 @@ export function DeliveryForm() {
             <span className={`upload-box ${errors.proof ? "has-error" : ""}`}>
               <span className="upload-icon" aria-hidden="true">↑</span>
               <strong>Pilih foto bukti pembayaran</strong>
-              <small>JPG, PNG, atau WEBP · Maksimal 4 MB · Target hasil di bawah 200 KB</small>
+              <small>JPG, PNG, atau WEBP · Maksimal 10 MB · Hasil di bawah 70 KB</small>
             </span>
           )}
           <input

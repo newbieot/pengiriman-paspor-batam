@@ -65,6 +65,18 @@ function validSubmission(submissionId = "11111111-1111-4111-8111-111111111111") 
   };
 }
 
+function jpegProof(size) {
+  const bytes = Buffer.alloc(size, 0);
+  bytes[0] = 0xff;
+  bytes[1] = 0xd8;
+  bytes[2] = 0xff;
+  return {
+    mimeType: "image/jpeg",
+    size: bytes.length,
+    base64: bytes.toString("base64"),
+  };
+}
+
 function storageEnv(bucket = createBucket(), queue = createQueue()) {
   return {
     ...env,
@@ -105,6 +117,8 @@ test("server-renders the passport delivery form", async () => {
   assert.match(html, /Paspor selesai/);
   assert.match(html, /Nama lengkap penerima/);
   assert.match(html, /Rp25\.000/);
+  assert.match(html, /Maksimal 10 MB/);
+  assert.match(html, /di bawah 70 KB/);
   assert.match(html, /logo-imigrasi\.png/);
   assert.match(html, /logo-posind\.png/);
   assert.match(html, /Tidak ada petugas Pos(?: Indonesia)? di lokasi Imigrasi Batam/);
@@ -173,6 +187,22 @@ test("durably accepts a valid submission before Google synchronization", async (
   assert.equal(status.status, "processing");
   assert.equal(status.submissionId, payload.submissionId);
   assert.equal("fingerprint" in status, false);
+});
+
+test("accepts proofs below 70 KB and rejects files at the strict limit", async () => {
+  const worker = await loadWorker();
+  const bucket = createBucket();
+  const queue = createQueue();
+  const runtimeEnv = storageEnv(bucket, queue);
+
+  const accepted = validSubmission("66666666-6666-4666-8666-666666666666");
+  accepted.proof = jpegProof(70 * 1024 - 1);
+  assert.equal((await submit(worker, runtimeEnv, accepted)).status, 202);
+
+  const rejected = validSubmission("77777777-7777-4777-8777-777777777777");
+  rejected.proof = jpegProof(70 * 1024);
+  assert.equal((await submit(worker, runtimeEnv, rejected)).status, 400);
+  assert.equal(queue.messages.length, 1);
 });
 
 test("keeps retries idempotent and rejects reused IDs with different data", async () => {
@@ -318,7 +348,7 @@ test("removes starter-only files and keeps private Drive links", async () => {
   assert.match(workerSource, /TURNSTILE_SECRET/);
   assert.match(workerSource, /PENDING_SUBMISSIONS/);
   assert.match(workerSource, /SUBMISSION_QUEUE/);
-  assert.match(workerSource, /MAX_PROOF_BYTES\s*=\s*200\s*\*\s*1024/);
+  assert.match(workerSource, /MAX_PROOF_BYTES\s*=\s*70\s*\*\s*1024/);
   assert.match(workerSource, /Data diterima sistem dan sedang diproses/);
   assert.doesNotMatch(workerSource, /console\.log\([^)]*(address|whatsapp|base64)/i);
 });
@@ -354,14 +384,16 @@ test("prepares a small payment proof before the user submits", async () => {
   const proofHandler = source.slice(source.indexOf("async function handleProof"), source.indexOf("function removeProof"));
   const submitHandler = source.slice(source.indexOf("async function handleSubmit"), source.indexOf("if (successId)"));
 
-  assert.match(source, /TARGET_PROOF_BYTES\s*=\s*190\s*\*\s*1024/);
-  assert.match(source, /MAX_CLIENT_PROOF_BYTES\s*=\s*200\s*\*\s*1024/);
+  assert.match(source, /MAX_SOURCE_FILE\s*=\s*10\s*\*\s*1024\s*\*\s*1024/);
+  assert.match(source, /TARGET_PROOF_BYTES\s*=\s*64\s*\*\s*1024/);
+  assert.match(source, /MAX_CLIENT_PROOF_BYTES\s*=\s*70\s*\*\s*1024/);
   assert.match(source, /COMPRESSION_ATTEMPTS/);
   assert.match(source, /maxDimension:\s*1600/);
-  assert.match(source, /maxDimension:\s*1200/);
+  assert.match(source, /maxDimension:\s*960/);
   assert.match(source, /canvasToPreferredBlob/);
   assert.match(source, /image\/webp/);
   assert.match(source, /jpeg\.type\s*!==\s*"image\/jpeg"/);
+  assert.match(source, /candidate\.blob\.size\s*<\s*output\.blob\.size/);
   assert.match(source, /output\.blob\.size\s*>=\s*MAX_CLIENT_PROOF_BYTES/);
   assert.doesNotMatch(source, /file\.size\s*<=\s*TARGET_PROOF_BYTES\)\s*return\s+toProcessedProof\(file/);
   assert.match(proofHandler, /setProofPreview\(`data:\$\{optimized\.mimeType\};base64,/);
