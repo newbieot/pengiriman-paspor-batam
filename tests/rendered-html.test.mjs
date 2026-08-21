@@ -113,3 +113,16 @@ test("project metadata is no longer the generic starter", async () => {
   assert.doesNotMatch(layout, /Starter Project|codex-preview/);
   await access(new URL(".openai/hosting.json", projectRoot));
 });
+
+test("prepares a small payment proof before the user submits", async () => {
+  const source = await readFile(new URL("../app/components/DeliveryForm.tsx", import.meta.url), "utf8");
+  const proofHandler = source.slice(source.indexOf("async function handleProof"), source.indexOf("function removeProof"));
+  const submitHandler = source.slice(source.indexOf("async function handleSubmit"), source.indexOf("if (successId)"));
+
+  assert.match(source, /TARGET_PROOF_BYTES\s*=\s*700\s*\*\s*1024/);
+  assert.match(proofHandler, /await compressProof\(file\)/);
+  assert.doesNotMatch(submitHandler, /compressProof\(/);
+  assert.match(submitHandler, /proof:\s*processedProof/);
+  assert.match(source, /disabled=\{submitting \|\| proofProcessing\}/);
+  assert.match(source, /Mengoptimalkan gambar/);
+});

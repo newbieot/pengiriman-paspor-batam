@@ -238,6 +238,10 @@ input[aria-invalid="true"], textarea[aria-invalid="true"], .phone-field.has-erro
 .proof-preview > span { min-width: 0; display: grid; }
 .proof-preview strong { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .proof-preview small { margin-top: 5px; color: var(--success); font-size: 8.5px; font-weight: 600; }
+.proof-status { display: flex; align-items: center; gap: 6px; }
+.proof-status.is-processing { color: var(--navy); }
+.proof-status.has-error { color: var(--danger); }
+.inline-spinner { width: 11px; height: 11px; border: 1.5px solid rgba(11,57,108,.24); border-top-color: var(--navy); border-radius: 50%; animation: spin .8s linear infinite; }
 .proof-preview button { padding: 6px; border: 0; color: var(--danger); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
 
 .privacy-details { margin-top: -3px; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfd; }

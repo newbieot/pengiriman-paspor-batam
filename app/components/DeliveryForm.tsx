@@ -12,6 +12,12 @@ type FormValues = {
 
 type ErrorKey = "fullName" | "address" | "phone" | "proof" | "privacy" | "captcha" | "general";
 type FormErrors = Partial<Record<ErrorKey, string>>;
+type ProofMimeType = "image/jpeg" | "image/png" | "image/webp";
+type ProcessedProof = {
+  mimeType: ProofMimeType;
+  size: number;
+  base64: string;
+};
 
 type TurnstileApi = {
   render: (
@@ -44,9 +50,11 @@ const EMPTY_FORM: FormValues = {
 
 const MAX_SOURCE_FILE = 4 * 1024 * 1024;
 const MAX_PROCESSED_FILE = 2 * 1024 * 1024;
-const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const TARGET_PROOF_BYTES = 700 * 1024;
+const ALLOWED_TYPES = new Set<ProofMimeType>(["image/jpeg", "image/png", "image/webp"]);
 
 function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
@@ -87,6 +95,7 @@ function validateForm(
 async function loadImage(file: File) {
   const objectUrl = URL.createObjectURL(file);
   const image = new Image();
+  image.decoding = "async";
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -100,6 +109,20 @@ async function loadImage(file: File) {
   }
 }
 
+function blobToBase64(blob: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Gambar tidak dapat dibaca."));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const separator = result.indexOf(",");
+      if (separator < 0) reject(new Error("Gambar tidak dapat diproses."));
+      else resolve(result.slice(separator + 1));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
 function canvasToBlob(canvas: HTMLCanvasElement, quality: number) {
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
@@ -110,13 +133,24 @@ function canvasToBlob(canvas: HTMLCanvasElement, quality: number) {
   });
 }
 
-async function compressProof(file: File) {
+async function toProcessedProof(blob: Blob, mimeType: ProofMimeType): Promise<ProcessedProof> {
+  return {
+    mimeType,
+    size: blob.size,
+    base64: await blobToBase64(blob),
+  };
+}
+
+async function compressProof(file: File): Promise<ProcessedProof> {
+  const sourceMimeType = file.type as ProofMimeType;
+  if (file.size <= TARGET_PROOF_BYTES) return toProcessedProof(file, sourceMimeType);
+
   const image = await loadImage(file);
-  let maxDimension = 1600;
-  let quality = 0.84;
+  let maxDimension = 1400;
+  let quality = 0.8;
   let output: Blob | null = null;
 
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
     const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -126,31 +160,25 @@ async function compressProof(file: File) {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Perangkat tidak mendukung pemrosesan gambar.");
 
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     context.drawImage(image, 0, 0, width, height);
     output = await canvasToBlob(canvas, quality);
 
-    if (output.size <= MAX_PROCESSED_FILE) break;
-    maxDimension = Math.round(maxDimension * 0.8);
-    quality = Math.max(0.58, quality - 0.08);
+    if (output.size <= TARGET_PROOF_BYTES) break;
+
+    const sizeRatio = Math.sqrt(TARGET_PROOF_BYTES / output.size);
+    maxDimension = Math.max(900, Math.round(maxDimension * Math.min(0.9, sizeRatio)));
+    quality = Math.max(0.58, quality - 0.06);
   }
 
   if (!output || output.size > MAX_PROCESSED_FILE) {
     throw new Error("Foto masih terlalu besar. Potong area bukti pembayaran lalu coba lagi.");
   }
 
-  const bytes = new Uint8Array(await output.arrayBuffer());
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  }
-
-  return {
-    mimeType: "image/jpeg",
-    size: output.size,
-    base64: btoa(binary),
-  };
+  return toProcessedProof(output, "image/jpeg");
 }
 
 function createSubmissionId() {
@@ -165,6 +193,8 @@ function createSubmissionId() {
 export function DeliveryForm() {
   const [values, setValues] = useState<FormValues>(EMPTY_FORM);
   const [proof, setProof] = useState<File | null>(null);
+  const [processedProof, setProcessedProof] = useState<ProcessedProof | null>(null);
+  const [proofProcessing, setProofProcessing] = useState(false);
   const [proofPreview, setProofPreview] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
   const [submitting, setSubmitting] = useState(false);
@@ -175,6 +205,8 @@ export function DeliveryForm() {
   const captchaRef = useRef<HTMLDivElement>(null);
   const widgetIdRef = useRef("");
   const qrCloseRef = useRef<HTMLButtonElement>(null);
+  const proofInputRef = useRef<HTMLInputElement>(null);
+  const proofJobRef = useRef(0);
 
   useEffect(() => {
     fetch("/api/config", { headers: { Accept: "application/json" } })
@@ -251,45 +283,74 @@ export function DeliveryForm() {
     setErrors((current) => ({ ...current, [errorField]: undefined, general: undefined }));
   }
 
-  function handleProof(event: ChangeEvent<HTMLInputElement>) {
+  async function handleProof(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
     const file = event.target.files?.[0] ?? null;
     if (!file) return;
 
-    if (!ALLOWED_TYPES.includes(file.type)) {
+    if (!ALLOWED_TYPES.has(file.type as ProofMimeType)) {
       setErrors((current) => ({ ...current, proof: "Gunakan gambar JPG, PNG, atau WEBP." }));
-      event.target.value = "";
+      input.value = "";
       return;
     }
     if (file.size > MAX_SOURCE_FILE) {
       setErrors((current) => ({ ...current, proof: "Ukuran foto maksimal 4 MB." }));
-      event.target.value = "";
+      input.value = "";
       return;
     }
 
+    const jobId = proofJobRef.current + 1;
+    proofJobRef.current = jobId;
     if (proofPreview) URL.revokeObjectURL(proofPreview);
+    const previewUrl = URL.createObjectURL(file);
     setProof(file);
-    setProofPreview(URL.createObjectURL(file));
+    setProcessedProof(null);
+    setProofProcessing(true);
+    setProofPreview(previewUrl);
     setErrors((current) => ({ ...current, proof: undefined, general: undefined }));
+
+    try {
+      const optimized = await compressProof(file);
+      if (proofJobRef.current !== jobId) return;
+      setProcessedProof(optimized);
+    } catch (error) {
+      if (proofJobRef.current !== jobId) return;
+      setProof(null);
+      setProcessedProof(null);
+      setProofPreview("");
+      input.value = "";
+      setErrors((current) => ({
+        ...current,
+        proof: error instanceof Error ? error.message : "Gambar tidak dapat diproses.",
+      }));
+    } finally {
+      if (proofJobRef.current === jobId) setProofProcessing(false);
+    }
   }
 
   function removeProof() {
+    proofJobRef.current += 1;
     if (proofPreview) URL.revokeObjectURL(proofPreview);
     setProof(null);
+    setProcessedProof(null);
+    setProofProcessing(false);
     setProofPreview("");
+    if (proofInputRef.current) proofInputRef.current.value = "";
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextErrors = validateForm(values, proof, Boolean(turnstileSiteKey), captchaToken);
+    if (proofProcessing) nextErrors.proof = "Tunggu sebentar, gambar masih dioptimalkan.";
+    else if (proof && !processedProof) nextErrors.proof = "Pilih ulang gambar bukti pembayaran.";
     setErrors(nextErrors);
-    if (Object.keys(nextErrors).length > 0 || !proof) {
+    if (Object.keys(nextErrors).length > 0 || !proof || !processedProof) {
       document.querySelector<HTMLElement>("[data-field-error]")?.focus();
       return;
     }
 
     setSubmitting(true);
     try {
-      const processedProof = await compressProof(proof);
       const submissionId = createSubmissionId();
       const response = await fetch("/api/submit", {
         method: "POST",
@@ -455,11 +516,17 @@ export function DeliveryForm() {
         <label className="upload-field">
           <span>Bukti pembayaran QRIS <b aria-hidden="true">*</b></span>
           {proof ? (
-            <span className="proof-preview">
+            <span className="proof-preview" aria-live="polite" aria-busy={proofProcessing}>
               <img src={proofPreview} alt="Pratinjau bukti pembayaran yang dipilih" />
               <span>
                 <strong>{proof.name}</strong>
-                <small>{formatBytes(proof.size)} · Siap diunggah</small>
+                {proofProcessing ? (
+                  <small className="proof-status is-processing"><span className="inline-spinner" aria-hidden="true" /> Mengoptimalkan gambar…</small>
+                ) : processedProof ? (
+                  <small className="proof-status">{formatBytes(proof.size)} → {formatBytes(processedProof.size)} · Siap dikirim</small>
+                ) : (
+                  <small className="proof-status has-error">Gambar belum siap. Pilih ulang.</small>
+                )}
               </span>
               <button
                 type="button"
@@ -477,10 +544,11 @@ export function DeliveryForm() {
             <span className={`upload-box ${errors.proof ? "has-error" : ""}`}>
               <span className="upload-icon" aria-hidden="true">↑</span>
               <strong>Pilih foto bukti pembayaran</strong>
-              <small>JPG, PNG, atau WEBP · Maksimal 4 MB</small>
+              <small>JPG, PNG, atau WEBP · Maksimal 4 MB · Dikompres otomatis</small>
             </span>
           )}
           <input
+            ref={proofInputRef}
             data-field-error={errors.proof ? "true" : undefined}
             className="visually-hidden"
             type="file"
@@ -531,10 +599,16 @@ export function DeliveryForm() {
 
         {errors.general && <div className="submit-error" role="alert">{errors.general}</div>}
 
-        <button className="submit-button" type="submit" disabled={submitting}>
-          {submitting ? <><span className="spinner" aria-hidden="true" /> Mengirim data…</> : <>Kirim data pengiriman <span aria-hidden="true">→</span></>}
+        <button className="submit-button" type="submit" disabled={submitting || proofProcessing}>
+          {proofProcessing ? (
+            <><span className="spinner" aria-hidden="true" /> Menyiapkan gambar…</>
+          ) : submitting ? (
+            <><span className="spinner" aria-hidden="true" /> Mengirim data…</>
+          ) : (
+            <>Kirim data pengiriman <span aria-hidden="true">→</span></>
+          )}
         </button>
-        <p className="form-note">Pengiriman diproses setelah bukti pembayaran diverifikasi petugas.</p>
+        <p className="form-note">Gambar diperkecil otomatis agar lebih cepat dikirim. Pengiriman diproses setelah bukti pembayaran diverifikasi petugas.</p>
       </form>
 
       {qrOpen && (
