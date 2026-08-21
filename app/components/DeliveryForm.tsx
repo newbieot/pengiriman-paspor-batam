@@ -50,11 +50,23 @@ const EMPTY_FORM: FormValues = {
 
 const MAX_SOURCE_FILE = 4 * 1024 * 1024;
 const MAX_PROCESSED_FILE = 2 * 1024 * 1024;
-const TARGET_PROOF_BYTES = 700 * 1024;
+const TARGET_PROOF_BYTES = 190 * 1024;
+const MAX_CLIENT_PROOF_BYTES = 200 * 1024;
 const ALLOWED_TYPES = new Set<ProofMimeType>(["image/jpeg", "image/png", "image/webp"]);
+const COMPRESSION_ATTEMPTS = [
+  { maxDimension: 1600, quality: 0.78 },
+  { maxDimension: 1600, quality: 0.68 },
+  { maxDimension: 1600, quality: 0.58 },
+  { maxDimension: 1440, quality: 0.62 },
+  { maxDimension: 1440, quality: 0.54 },
+  { maxDimension: 1280, quality: 0.58 },
+  { maxDimension: 1200, quality: 0.54 },
+  { maxDimension: 1200, quality: 0.5 },
+] as const;
+let webpEncodingSupported: boolean | null = null;
 
 function formatBytes(bytes: number) {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.floor(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
@@ -123,14 +135,30 @@ function blobToBase64(blob: Blob) {
   });
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement, quality: number) {
+function canvasToBlob(canvas: HTMLCanvasElement, mimeType: ProofMimeType, quality: number) {
   return new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (blob) => (blob ? resolve(blob) : reject(new Error("Gambar tidak dapat diproses."))),
-      "image/jpeg",
+      mimeType,
       quality,
     );
   });
+}
+
+async function canvasToPreferredBlob(canvas: HTMLCanvasElement, quality: number) {
+  if (webpEncodingSupported !== false) {
+    try {
+      const webp = await canvasToBlob(canvas, "image/webp", quality);
+      webpEncodingSupported = webp.type === "image/webp";
+      if (webpEncodingSupported) return { blob: webp, mimeType: "image/webp" as const };
+    } catch {
+      webpEncodingSupported = false;
+    }
+  }
+
+  const jpeg = await canvasToBlob(canvas, "image/jpeg", quality);
+  if (jpeg.type !== "image/jpeg") throw new Error("Perangkat tidak mendukung kompresi gambar yang aman.");
+  return { blob: jpeg, mimeType: "image/jpeg" as const };
 }
 
 async function toProcessedProof(blob: Blob, mimeType: ProofMimeType): Promise<ProcessedProof> {
@@ -146,11 +174,10 @@ async function compressProof(file: File): Promise<ProcessedProof> {
   if (file.size <= TARGET_PROOF_BYTES) return toProcessedProof(file, sourceMimeType);
 
   const image = await loadImage(file);
-  let maxDimension = 1400;
-  let quality = 0.8;
-  let output: Blob | null = null;
+  let output: { blob: Blob; mimeType: "image/jpeg" | "image/webp" } | null = null;
 
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  for (const attempt of COMPRESSION_ATTEMPTS) {
+    const { maxDimension, quality } = attempt;
     const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
     const width = Math.max(1, Math.round(image.naturalWidth * scale));
     const height = Math.max(1, Math.round(image.naturalHeight * scale));
@@ -165,20 +192,19 @@ async function compressProof(file: File): Promise<ProcessedProof> {
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, width, height);
     context.drawImage(image, 0, 0, width, height);
-    output = await canvasToBlob(canvas, quality);
+    output = await canvasToPreferredBlob(canvas, quality);
 
-    if (output.size <= TARGET_PROOF_BYTES) break;
-
-    const sizeRatio = Math.sqrt(TARGET_PROOF_BYTES / output.size);
-    maxDimension = Math.max(900, Math.round(maxDimension * Math.min(0.9, sizeRatio)));
-    quality = Math.max(0.58, quality - 0.06);
+    if (output.blob.size <= TARGET_PROOF_BYTES) break;
   }
 
-  if (!output || output.size > MAX_PROCESSED_FILE) {
+  if (!output || output.blob.size > MAX_PROCESSED_FILE) {
     throw new Error("Foto masih terlalu besar. Potong area bukti pembayaran lalu coba lagi.");
   }
+  if (output.blob.size >= MAX_CLIENT_PROOF_BYTES) {
+    throw new Error("Gambar belum dapat diperkecil di bawah 200 KB tanpa mengurangi keterbacaan. Potong area transaksi lalu coba lagi.");
+  }
 
-  return toProcessedProof(output, "image/jpeg");
+  return toProcessedProof(output.blob, output.mimeType);
 }
 
 function createSubmissionId() {
@@ -312,6 +338,8 @@ export function DeliveryForm() {
     try {
       const optimized = await compressProof(file);
       if (proofJobRef.current !== jobId) return;
+      URL.revokeObjectURL(previewUrl);
+      setProofPreview(`data:${optimized.mimeType};base64,${optimized.base64}`);
       setProcessedProof(optimized);
     } catch (error) {
       if (proofJobRef.current !== jobId) return;
@@ -544,7 +572,7 @@ export function DeliveryForm() {
             <span className={`upload-box ${errors.proof ? "has-error" : ""}`}>
               <span className="upload-icon" aria-hidden="true">↑</span>
               <strong>Pilih foto bukti pembayaran</strong>
-              <small>JPG, PNG, atau WEBP · Maksimal 4 MB · Dikompres otomatis</small>
+              <small>JPG, PNG, atau WEBP · Maksimal 4 MB · Target hasil di bawah 200 KB</small>
             </span>
           )}
           <input

@@ -119,7 +119,16 @@ test("prepares a small payment proof before the user submits", async () => {
   const proofHandler = source.slice(source.indexOf("async function handleProof"), source.indexOf("function removeProof"));
   const submitHandler = source.slice(source.indexOf("async function handleSubmit"), source.indexOf("if (successId)"));
 
-  assert.match(source, /TARGET_PROOF_BYTES\s*=\s*700\s*\*\s*1024/);
+  assert.match(source, /TARGET_PROOF_BYTES\s*=\s*190\s*\*\s*1024/);
+  assert.match(source, /MAX_CLIENT_PROOF_BYTES\s*=\s*200\s*\*\s*1024/);
+  assert.match(source, /COMPRESSION_ATTEMPTS/);
+  assert.match(source, /maxDimension:\s*1600/);
+  assert.match(source, /maxDimension:\s*1200/);
+  assert.match(source, /canvasToPreferredBlob/);
+  assert.match(source, /image\/webp/);
+  assert.match(source, /jpeg\.type\s*!==\s*"image\/jpeg"/);
+  assert.match(source, /output\.blob\.size\s*>=\s*MAX_CLIENT_PROOF_BYTES/);
+  assert.match(proofHandler, /setProofPreview\(`data:\$\{optimized\.mimeType\};base64,/);
   assert.match(proofHandler, /await compressProof\(file\)/);
   assert.doesNotMatch(submitHandler, /compressProof\(/);
   assert.match(submitHandler, /proof:\s*processedProof/);
