@@ -36,6 +36,15 @@ test("server-renders the passport delivery form", async () => {
   assert.match(html, /Rp25\.000/);
   assert.match(html, /logo-imigrasi\.png/);
   assert.match(html, /logo-posind\.png/);
+  assert.match(html, /Tidak ada petugas Pos(?: Indonesia)? di lokasi Imigrasi Batam/);
+  assert.match(html, /Riky Juliadi/);
+  assert.match(html, /0813-7221-2002/);
+  assert.match(html, /https:\/\/wa\.me\/6281372212002/);
+  assert.match(html, /tel:\+6281372212002/);
+  assert.ok(
+    html.indexOf('aria-label="Formulir pengiriman paspor"') < html.indexOf('class="hero-copy"'),
+    "the form should appear before service details in the mobile document order",
+  );
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Your site is taking shape/i);
 });
 

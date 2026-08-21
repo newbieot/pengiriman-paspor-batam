@@ -174,6 +174,7 @@ export function DeliveryForm() {
   const [captchaToken, setCaptchaToken] = useState("");
   const captchaRef = useRef<HTMLDivElement>(null);
   const widgetIdRef = useRef("");
+  const qrCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     fetch("/api/config", { headers: { Accept: "application/json" } })
@@ -226,11 +227,16 @@ export function DeliveryForm() {
 
   useEffect(() => {
     if (!qrOpen) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setQrOpen(false);
     };
     document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
+    qrCloseRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      previouslyFocused?.focus();
+    };
   }, [qrOpen]);
 
   useEffect(() => {
@@ -355,6 +361,16 @@ export function DeliveryForm() {
         <h2>Ke mana paspor dikirim?</h2>
         <p>Pastikan data sesuai dengan penerima di alamat tujuan.</p>
       </div>
+
+      <aside className="form-assistance" aria-label="Kontak bantuan Pos Indonesia">
+        <span className="assistance-icon" aria-hidden="true">?</span>
+        <p>
+          Tidak ada petugas Pos di lokasi Imigrasi Batam. Kendala?{" "}
+          <a href="https://wa.me/6281372212002" target="_blank" rel="noopener noreferrer">
+            Hubungi Riky Juliadi · 0813-7221-2002
+          </a>
+        </p>
+      </aside>
 
       <form className="delivery-form" onSubmit={handleSubmit} noValidate>
         <label>
@@ -522,11 +538,9 @@ export function DeliveryForm() {
       </form>
 
       {qrOpen && (
-        <div className="qr-modal" role="dialog" aria-modal="true" aria-label="Kode QRIS pembayaran" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setQrOpen(false);
-        }}>
+        <div className="qr-modal" role="dialog" aria-modal="true" aria-label="Kode QRIS pembayaran">
           <div className="qr-modal-card">
-            <button className="modal-close" type="button" onClick={() => setQrOpen(false)} aria-label="Tutup kode QRIS" autoFocus>×</button>
+            <button ref={qrCloseRef} className="modal-close" type="button" onClick={() => setQrOpen(false)} aria-label="Tutup kode QRIS">×</button>
             <span className="eyebrow">Scan dengan aplikasi pembayaran</span>
             <h3>Ongkir &amp; sampul · Rp25.000</h3>
             <img src="/assets/qris-pengiriman-paspor.png" alt="QRIS pembayaran ongkir dan sampul paspor sebesar Rp25.000, atas nama RIKY JULIADI" />

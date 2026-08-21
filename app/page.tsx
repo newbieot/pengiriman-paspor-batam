@@ -15,16 +15,31 @@ export default function Home() {
             <small>Batam · 29400</small>
           </span>
         </a>
-        <a className="help-link" href="#bantuan">Butuh bantuan?</a>
+        <a
+          className="help-link"
+          href="https://wa.me/6281372212002"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Hubungi Riky Juliadi melalui WhatsApp"
+        >
+          <span>Butuh bantuan?</span>
+          <strong>WhatsApp Riky</strong>
+        </a>
       </header>
 
+      <h1 className="visually-hidden">Formulir Pengiriman Paspor ke Rumah</h1>
+
       <section className="hero" id="top">
+        <section className="form-shell" aria-label="Formulir pengiriman paspor">
+          <DeliveryForm />
+        </section>
+
         <div className="hero-copy">
           <div className="service-label">
             <span className="service-dot" aria-hidden="true" />
             Layanan pengiriman ke alamat rumah
           </div>
-          <h1>Paspor selesai.<br />Biar kami yang antar.</h1>
+          <h2 className="hero-title">Paspor selesai.<br />Biar kami yang antar.</h2>
           <p className="hero-lead">
             Untuk pemohon Imigrasi Batam: isi data penerima, bayar ongkir, lalu unggah buktinya. Prosesnya hanya beberapa menit.
           </p>
@@ -52,10 +67,6 @@ export default function Home() {
             <p>Formulir ini khusus untuk pengiriman paspor yang sudah selesai, bukan untuk permohonan atau penerbitan paspor.</p>
           </aside>
         </div>
-
-        <section className="form-shell" aria-label="Formulir pengiriman paspor">
-          <DeliveryForm />
-        </section>
       </section>
 
       <section className="support-section" id="bantuan">
@@ -63,7 +74,22 @@ export default function Home() {
           <span className="eyebrow">Bantuan layanan</span>
           <h2>Ada kendala saat mengisi?</h2>
         </div>
-        <p>Jangan mengirim PIN, OTP, foto paspor, NIK, atau nomor rekening penuh. Untuk bantuan, hubungi petugas Pos Indonesia di lokasi layanan Imigrasi Batam.</p>
+        <div className="support-content">
+          <p className="onsite-note"><strong>Tidak ada petugas Pos Indonesia di lokasi Imigrasi Batam.</strong> Jika membutuhkan bantuan, hubungi petugas Pos Indonesia KCU Batam berikut.</p>
+          <div className="contact-person">
+            <span className="contact-avatar" aria-hidden="true">RJ</span>
+            <span>
+              <small>Petugas Pos Indonesia KCU Batam</small>
+              <strong>Riky Juliadi</strong>
+              <a href="tel:+6281372212002">0813-7221-2002</a>
+            </span>
+          </div>
+          <div className="contact-actions">
+            <a className="contact-action contact-action-primary" href="https://wa.me/6281372212002" target="_blank" rel="noopener noreferrer">Hubungi via WhatsApp</a>
+            <a className="contact-action" href="tel:+6281372212002">Telepon</a>
+          </div>
+          <p className="security-note">Jangan pernah mengirim PIN, OTP, foto paspor, NIK, atau nomor rekening penuh melalui pesan.</p>
+        </div>
       </section>
 
       <footer>
